@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dot Art Person Segmenter</title>
+  <!-- MediaPipe & TFJS CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-segmentation"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background-color: #1a1a24;
+      color: #fff;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    header {
+      margin: 20px 0 10px;
+      text-align: center;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.8rem;
+      color: #00ffcc;
+      text-shadow: 2px 2px #ff0055;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 15px;
+      width: 90%;
+      max-width: 800px;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 15px;
+      justify-content: center;
+      background: #2a2a38;
+      padding: 15px;
+      border-radius: 12px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-size: 0.9rem;
+    }
+    input[type="range"] {
+      cursor: pointer;
+    }
+    button, label.btn {
+      background: #ff0055;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: 0.2s;
+    }
+    button:hover, label.btn:hover {
+      background: #00ffcc;
+      color: #000;
+    }
+    input[type="file"] {
+      display: none;
+    }
+    .canvas-wrapper {
+      position: relative;
+      background-color: #000;
+      border: 4px solid #333;
+      border-radius: 8px;
+      overflow: hidden;
+      max-width: 100%;
+    }
+    canvas {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      image-rendering: pixelated; /* ドット絵をクッキリ表示 */
+    }
+    #status {
+      margin-top: 5px;
+      font-size: 0.85rem;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Pixel VTuber Cam</h1>
+</header>
+
+<div class="container">
+  <div class="controls">
+    <button id="btn-cam">カメラ起動</button>
+    <label class="btn" for="file-input">ファイル選択 (画像/動画)</label>
+    <input type="file" id="file-input" accept="image/*,video/*">
+
+    <div class="control-group">
+      <label for="pixel-size">ドットの大きさ: <span id="pixel-val">12</span>px</label>
+      <input type="range" id="pixel-size" min="4" max="32" value="12">
+    </div>
+
+    <div class="control-group">
+      <label for="bg-color">背景色:</label>
+      <input type="color" id="bg-color" value="#00ff00"> <!-- デフォルト：グリーンバック -->
+    </div>
+  </div>
+
+  <div id="status">AIモデルを読み込み中...</div>
+
+  <div class="canvas-wrapper">
+    <canvas id="output-canvas"></canvas>
+  </div>
+</div>
+
+<!-- 非表示のメディア要素 -->
+<video id="video-element" playsinline style="display:none;"></video>
+<img id="image-element" style="display:none;">
+
+<script>
+  let segmenter = null;
+  let animationFrameId = null;
+  let currentSource = null; // 'cam', 'video', 'image'
+
+  const canvas = document.getElementById('output-canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const video = document.getElementById('video-element');
+  const img = document.getElementById('image-element');
+  
+  const btnCam = document.getElementById('btn-cam');
+  const fileInput = document.getElementById('file-input');
+  const pixelSizeInput = document.getElementById('pixel-size');
+  const pixelValSpan = document.getElementById('pixel-val');
+  const bgColorInput = document.getElementById('bg-color');
+  const statusDiv = document.getElementById('status');
+
+  // 1. AIモデルの初期化
+  async function initModel() {
+    try {
+      const model = bodySegmentation.SupportedModels.MediaPipeSelfieSegmentation;
+      const segmenterConfig = {
+        runtime: 'mediapipe',
+        solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation',
+        modelType: 'general'
+      };
+      segmenter = await bodySegmentation.createSegmenter(model, segmenterConfig);
+      statusDiv.textContent = '準備完了！カメラ起動またはファイルを選択してください。';
+    } catch (e) {
+      console.error(e);
+      statusDiv.textContent = 'モデルの読み込みに失敗しました。';
+    }
+  }
+  initModel();
+
+  // スライダーの値表示更新
+  pixelSizeInput.addEventListener('input', (e) => {
+    pixelValSpan.textContent = e.target.value;
+    if (currentSource === 'image') processFrame(img);
+  });
+  bgColorInput.addEventListener('input', () => {
+    if (currentSource === 'image') processFrame(img);
+  });
+
+  // 2. カメラ起動
+  btnCam.addEventListener('click', async () => {
+    stopCurrentSource();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      video.srcObject = stream;
+      await video.play();
+      
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      currentSource = 'cam';
+      statusDiv.textContent = 'カメラ動作中';
+      loop();
+    } catch (err) {
+      alert('カメラのアクセスに失敗しました: ' + err.message);
+    }
+  });
+
+  // 3. ファイル選択 (画像/動画)
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    stopCurrentSource();
+    const url = URL.createObjectURL(file);
+
+    if (file.type.startsWith('image/')) {
+      img.onload = () => {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        currentSource = 'image';
+        statusDiv.textContent = '画像を処理中...';
+        processFrame(img);
+      };
+      img.src = url;
+    } else if (file.type.startsWith('video/')) {
+      video.srcObject = null;
+      video.src = url;
+      video.loop = true;
+      video.onloadedmetadata = () => {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        video.play();
+        currentSource = 'video';
+        statusDiv.textContent = '動画再生中';
+        loop();
+      };
+    }
+  });
+
+  function stopCurrentSource() {
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    if (video.srcObject) {
+      video.srcObject.getTracks().forEach(track => track.stop());
+    }
+    video.pause();
+  }
+
+  // 4. フレーム処理ループ (動画・カメラ用)
+  async function loop() {
+    if (currentSource === 'cam' || currentSource === 'video') {
+      await processFrame(video);
+      animationFrameId = requestAnimationFrame(loop);
+    }
+  }
+
+  // 5. 切り抜き & ドット絵化 コア処理
+  async function processFrame(sourceElement) {
+    if (!segmenter) return;
+
+    // AIによる人物マスク生成
+    const people = await segmenter.segmentPeople(sourceElement);
+    if (!people || people.length === 0) return;
+
+    // マスクデータの取得
+    const segmentation = people[0];
+    const mask = await segmentation.mask.toImageData();
+
+    // 一時用キャンバスの作成
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = canvas.width;
+    offCanvas.height = canvas.height;
+    const offCtx = offCanvas.getContext('2d');
+
+    // 元画像の描画
+    offCtx.drawImage(sourceElement, 0, 0, canvas.width, canvas.height);
+    const imgData = offCtx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // 背景の塗りつぶし
+    ctx.fillStyle = bgColorInput.value;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const pSize = parseInt(pixelSizeInput.value, 10);
+    const w = canvas.width;
+    const h = canvas.height;
+
+    // モザイク（ドット絵）処理
+    // 指定したドットサイズごとにループ
+    for (let y = 0; y < h; y += pSize) {
+      for (let x = 0; x < w; x += pSize) {
+        // ブロックの中心ピクセルをサンプリング
+        const centerX = Math.min(x + Math.floor(pSize / 2), w - 1);
+        const centerY = Math.min(y + Math.floor(pSize / 2), h - 1);
+        const index = (centerY * w + centerX) * 4;
+
+        // 人物部分判定 (MediaPipeのアルファ値判定)
+        const isPerson = mask.data[index + 3] > 128;
+
+        if (isPerson) {
+          const r = imgData.data[index];
+          const g = imgData.data[index + 1];
+          const b = imgData.data[index + 2];
+
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.fillRect(x, y, pSize, pSize);
+        }
+      }
+    }
+  }
+</script>
+</body>
+</html>
+
+
